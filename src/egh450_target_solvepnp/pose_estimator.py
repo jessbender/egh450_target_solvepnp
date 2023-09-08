@@ -1,16 +1,17 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys
 import rospy
 import cv2
 import numpy as np
 import tf2_ros
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PoseStamped, Point
 
 from sensor_msgs.msg import Image
 from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
+from std_msgs.msg import String
 
 class PoseEstimator():
 	def __init__(self):
@@ -32,8 +33,16 @@ class PoseEstimator():
 		self.camera_matrix = None
 		self.dist_coeffs = None
 
+		# init UAV pose
+		self.uav_pose = []
+		self.x_p = "-1"
+		self.y_p = "-1"
+
 		# Set up the publishers, subscribers, and tf2
 		self.sub_info = rospy.Subscriber("~camera_info", CameraInfo, self.callback_info)
+
+		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
+		self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
 
 		if self.param_use_compressed:
 			self.sub_img = rospy.Subscriber("~image_raw/compressed", CompressedImage, self.callback_img)
@@ -60,6 +69,18 @@ class PoseEstimator():
 		# Unregister anything that needs it here
 		self.sub_info.unregister()
 		self.sub_img.unregister()
+
+	def callback_uav_pose(self, msg_in):
+		self.current_location = msg_in.pose.position
+		self.uav_pose = [self.current_location.x, self.current_location.y, self.current_location.z, 0.0]
+
+	def callback_coord(self, msg_in):		
+		if msg_in.data != '':
+			msg = msg_in.data.split('-')
+			if msg[0] != '1':
+				self.x_p = msg[1]
+				self.y_p = msg[2]
+
 
 	# Collect in the camera characteristics
 	def callback_info(self, msg_in):
@@ -93,16 +114,21 @@ class PoseEstimator():
 			# Perform a colour mask for detection
 			mask_image = self.process_image(cv_image)
 
-			# Find circles in the masked image
-			min_dist = mask_image.shape[0]/8
-			circles = cv2.HoughCircles(mask_image, cv2.HOUGH_GRADIENT, 1, min_dist, param1=50, param2=20, minRadius=0, maxRadius=0)
+			# # Find circles in the masked image
+			# min_dist = mask_image.shape[0]/8
+			# circles = cv2.HoughCircles(mask_image, cv2.HOUGH_GRADIENT, 1, min_dist, param1=50, param2=20, minRadius=0, maxRadius=0)
 
 			# If circles were detected
-			if circles is not None:
+			if self.sub_topic_coord is not None:
 				# Just take the first detected circle
-				px = circles[0,0,0]
-				py = circles[0,0,1]
-				pr = circles[0,0,2]
+				# px = circles[0,0,0]
+				# py = circles[0,0,1]
+				# pr = circles[0,0,2]
+
+				# Centre of bounding box detection 
+				px = int(self.x_p)
+				py = int(self.y_p)
+				pr = 10 # Current Altitude (m)
 
 				# Calculate the pictured the model for the pose solver
 				# For this example, draw a square around where the circle should be
@@ -113,6 +139,7 @@ class PoseEstimator():
 											(px+pr, py-pr),
 											(px-pr, py+pr),
 											(px-pr, py-pr)])
+				self.model_image = self.model_image.astype('float32')
 
 				# Do the SolvePnP method
 				(success, rvec, tvec) = cv2.solvePnP(self.model_object, self.model_image, self.camera_matrix, self.dist_coeffs)
@@ -121,7 +148,7 @@ class PoseEstimator():
 				if success:
 					msg_out = TransformStamped()
 					msg_out.header = msg_in.header
-					msg_out.child_frame_id = "circle"
+					msg_out.child_frame_id = "target"
 					msg_out.transform.translation.x = tvec[0]
 					msg_out.transform.translation.y = tvec[1]
 					msg_out.transform.translation.z = tvec[2]
