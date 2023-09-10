@@ -11,7 +11,7 @@ from sensor_msgs.msg import Image
 from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
-from std_msgs.msg import String
+from std_msgs.msg import String, Time
 
 class PoseEstimator():
 	def __init__(self):
@@ -40,6 +40,8 @@ class PoseEstimator():
 
 		# Set up the publishers, subscribers, and tf2
 		self.sub_info = rospy.Subscriber("~camera_info", CameraInfo, self.callback_info)
+		
+		self.pub_found = rospy.Publisher('/emulated_uav/target_found', Time, queue_size=10)
 
 		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
 		self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
@@ -158,6 +160,8 @@ class PoseEstimator():
 					msg_out.transform.rotation.z = 0.0
 
 					self.tfbr.sendTransform(msg_out)
+					time_found = rospy.Time.now()
+					self.pub_found.publish(time_found)
 
 				# Draw the circle for the overlay
 				cv2.circle(cv_image, (px,py), 2, (255, 0, 0), 2)	# Center
