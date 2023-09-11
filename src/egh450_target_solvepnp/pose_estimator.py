@@ -17,6 +17,8 @@ class PoseEstimator():
 	def __init__(self):
 		# Set up the CV Bridge
 		self.bridge = CvBridge()
+		self.pubrefresh = False
+
 
 		# Load in parameters from ROS
 		self.param_use_compressed = rospy.get_param("~use_compressed", False)
@@ -41,7 +43,7 @@ class PoseEstimator():
 		# Set up the publishers, subscribers, and tf2
 		self.sub_info = rospy.Subscriber("~camera_info", CameraInfo, self.callback_info)
 		
-		self.pub_found = rospy.Publisher('/uavasr/target_found', Time, queue_size=10)
+		self.pub_found = rospy.Publisher('/uavasr/target_found', Time, queue_size=1)
 
 		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
 		# TODO: change back for flight
@@ -84,6 +86,7 @@ class PoseEstimator():
 			if msg[0] != '1':
 				self.x_p = msg[1]
 				self.y_p = msg[2]
+				self.pubrefresh = True
 
 
 	# Collect in the camera characteristics
@@ -123,7 +126,8 @@ class PoseEstimator():
 			# circles = cv2.HoughCircles(mask_image, cv2.HOUGH_GRADIENT, 1, min_dist, param1=50, param2=20, minRadius=0, maxRadius=0)
 
 			# If circles were detected
-			if self.sub_topic_coord is not None:
+			if (self.sub_topic_coord is not None) and self.pubrefresh == True:
+				self.pubrefresh = False
 				# Just take the first detected circle
 				# px = circles[0,0,0]
 				# py = circles[0,0,1]
@@ -162,9 +166,10 @@ class PoseEstimator():
 					msg_out.transform.rotation.y = 0.0
 					msg_out.transform.rotation.z = 0.0
 
-					self.tfbr.sendTransform(msg_out)
 					time_found = rospy.Time.now()
 					self.pub_found.publish(time_found)
+					self.tfbr.sendTransform(msg_out)
+					
 
 				# Draw the circle for the overlay
 				cv2.circle(cv_image, (px,py), 2, (255, 0, 0), 2)	# Center
