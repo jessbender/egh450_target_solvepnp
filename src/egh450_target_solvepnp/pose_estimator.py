@@ -41,10 +41,12 @@ class PoseEstimator():
 		# Set up the publishers, subscribers, and tf2
 		self.sub_info = rospy.Subscriber("~camera_info", CameraInfo, self.callback_info)
 		
-		self.pub_found = rospy.Publisher('/emulated_uav/target_found', Time, queue_size=10)
+		self.pub_found = rospy.Publisher('/uavasr/target_found', Time, queue_size=10)
 
 		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
-		self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
+		# TODO: change back for flight
+		# self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
+		self.sub_uav_pose = rospy.Subscriber('/uavasr/pose', PoseStamped, self.callback_uav_pose)
 
 		if self.param_use_compressed:
 			self.sub_img = rospy.Subscriber("~image_raw/compressed", CompressedImage, self.callback_img)
@@ -130,7 +132,8 @@ class PoseEstimator():
 				# Centre of bounding box detection 
 				px = int(self.x_p)
 				py = int(self.y_p)
-				pr = 10 # Current Altitude (m)
+				pr = int(3 * self.current_location.z) # Current Altitude (m)
+				# pr = 30
 
 				# Calculate the pictured the model for the pose solver
 				# For this example, draw a square around where the circle should be
