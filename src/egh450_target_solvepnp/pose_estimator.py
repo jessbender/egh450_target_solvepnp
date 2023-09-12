@@ -136,7 +136,7 @@ class PoseEstimator():
 				# Centre of bounding box detection 
 				px = int(self.x_p)
 				py = int(self.y_p)
-				pr = int(3 * self.current_location.z) # Current Altitude (m)
+				pr = int(0.5 * self.current_location.z) # Current Altitude (m)
 				# pr = 30
 
 				# Calculate the pictured the model for the pose solver
