@@ -47,8 +47,8 @@ class PoseEstimator():
 
 		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
 		# TODO: change back for flight
-		# self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
-		self.sub_uav_pose = rospy.Subscriber('/uavasr/pose', PoseStamped, self.callback_uav_pose)
+		self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
+		# self.sub_uav_pose = rospy.Subscriber('/uavasr/pose', PoseStamped, self.callback_uav_pose)
 
 		if self.param_use_compressed:
 			self.sub_img = rospy.Subscriber("~image_raw/compressed", CompressedImage, self.callback_img)
