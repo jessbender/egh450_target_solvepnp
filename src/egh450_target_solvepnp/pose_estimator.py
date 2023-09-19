@@ -3,22 +3,28 @@
 import sys
 import rospy
 import cv2
+import math
 import numpy as np
 import tf2_ros
+import tf.transformations as tf_trans
 from geometry_msgs.msg import TransformStamped, PoseStamped, Point
-
-from sensor_msgs.msg import Image
-from sensor_msgs.msg import CompressedImage
-from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
-from std_msgs.msg import String, Time
+from std_msgs.msg import Bool, String, Time
 
 class PoseEstimator():
+	aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_5X5_100)
+	aruco_params = cv2.aruco.DetectorParameters_create()
+
 	def __init__(self):
+
+		self.aruco_pub = rospy.Publisher(
+            '/processed_aruco/image/compressed', CompressedImage, queue_size=10)
+		self.pub_tts = rospy.Publisher('/depthai_node/detection/tts', String, queue_size=10)
+		
 		# Set up the CV Bridge
 		self.bridge = CvBridge()
 		self.pubrefresh = False
-
 
 		# Load in parameters from ROS
 		self.param_use_compressed = rospy.get_param("~use_compressed", False)
@@ -40,6 +46,12 @@ class PoseEstimator():
 		self.x_p = "-1"
 		self.y_p = "-1"
 
+		# Set up landing site publisher
+		self.land_pub = rospy.Publisher('landing_site', Bool, queue_size=2)
+		self.landing = False
+
+		self.aruco_pose_pub = rospy.Publisher('/depthai_node/detection/aruco_pose', PoseStamped, queue_size=10)
+
 		# Set up the publishers, subscribers, and tf2
 		self.sub_info = rospy.Subscriber("~camera_info", CameraInfo, self.callback_info)
 		
@@ -47,8 +59,8 @@ class PoseEstimator():
 
 		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
 		# TODO: change back for flight
-		self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
-		# self.sub_uav_pose = rospy.Subscriber('/uavasr/pose', PoseStamped, self.callback_uav_pose)
+		# self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
+		self.sub_uav_pose = rospy.Subscriber('/uavasr/pose', PoseStamped, self.callback_uav_pose)
 
 		if self.param_use_compressed:
 			self.sub_img = rospy.Subscriber("~image_raw/compressed", CompressedImage, self.callback_img)
@@ -79,7 +91,9 @@ class PoseEstimator():
 	def callback_uav_pose(self, msg_in):
 		self.current_location = msg_in.pose.position
 		self.uav_pose = [self.current_location.x, self.current_location.y, self.current_location.z, 0.0]
-
+		self.x_p = self.uav_pose[0]
+		self.y_p = self.uav_pose[1]
+	
 	def callback_coord(self, msg_in):		
 		if msg_in.data != '':
 			msg = msg_in.data.split('-')
@@ -117,6 +131,10 @@ class PoseEstimator():
 			except CvBridgeError as e:
 				rospy.loginfo(e)
 				return
+			
+			if self.landing == False:
+				aruco = self.find_aruco(cv_image, msg_in)
+				self.publish_to_ros(aruco)
 
 			# Perform a colour mask for detection
 			mask_image = self.process_image(cv_image)
@@ -152,7 +170,7 @@ class PoseEstimator():
 
 				# Do the SolvePnP method
 				(success, rvec, tvec) = cv2.solvePnP(self.model_object, self.model_image, self.camera_matrix, self.dist_coeffs)
-
+				
 				# If a result was found, send to TF2
 				if success:
 					msg_out = TransformStamped()
@@ -166,7 +184,8 @@ class PoseEstimator():
 					msg_out.transform.rotation.y = 0.0
 					msg_out.transform.rotation.z = 0.0
 
-					time_found = rospy.Time.now()
+					# time_found = rospy.Time.now()
+					time_found = rospy.Time(0)
 					self.pub_found.publish(time_found)
 					self.tfbr.sendTransform(msg_out)
 					
@@ -218,11 +237,95 @@ class PoseEstimator():
 
 		return mask_image
 
+	def find_aruco(self, frame, msg_in):
+		if self.got_camera_info:
+			(corners, ids, _) = cv2.aruco.detectMarkers(
+				frame, self.aruco_dict, parameters=self.aruco_params)
 
+			tts_target = String()
+			tts_target.data = ''
 
+			if len(corners) > 0:
+				ids = ids.flatten()
 
+				for (marker_corner, marker_ID) in zip(corners, ids):
+					# TODO: if marker_ID == land_aruco
+					aruco_corners = corners
+					corners = marker_corner.reshape((4, 2))
+					(top_left, top_right, bottom_right, bottom_left) = corners
 
+					top_right = (int(top_right[0]), int(top_right[1]))
+					bottom_right = (int(bottom_right[0]), int(bottom_right[1]))
+					bottom_left = (int(bottom_left[0]), int(bottom_left[1]))
+					top_left = (int(top_left[0]), int(top_left[1]))
 
+					cv2.line(frame, top_left, top_right, (0, 255, 0), 2)
+					cv2.line(frame, top_right, bottom_right, (0, 255, 0), 2)
+					cv2.line(frame, bottom_right, bottom_left, (0, 255, 0), 2)
+					cv2.line(frame, bottom_left, top_left, (0, 255, 0), 2)
 
+					rospy.loginfo("Aruco detected, ID: {} a coordinate: {}, {}".format(marker_ID, self.x_p, self.y_p))
+					self.landing = True
 
+					tts_target.data = "Landing Site: ArUco Marker {}".format(marker_ID)
+					self.pub_tts.publish(tts_target)
 
+					cv2.putText(frame, str(
+						marker_ID), (top_left[0], top_right[1] - 15), cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 255, 0), 2)
+					
+					# Estimate the pose of the ArUco marker
+					rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(aruco_corners, 0.3, self.camera_matrix, self.dist_coeffs)
+					
+					if rvec is not None and tvec is not None:
+
+						roll, pitch, yaw = rvec[0][0]
+						# Convert roll and pitch to degrees
+						roll_degrees = math.degrees(roll)
+						pitch_degrees = math.degrees(pitch)
+						
+						rospy.loginfo('Roll: {} degrees, Pitch: {} degrees'.format(roll_degrees, pitch_degrees))
+						
+						# Check if both roll and pitch are close to zero (within a tolerance)
+						tolerance_degrees = 5.0  # Adjust this tolerance as needed
+						if abs(roll_degrees) < tolerance_degrees and abs(pitch_degrees) < tolerance_degrees:
+							rospy.loginfo('Marker is safe to land on.')
+						else:
+							rospy.loginfo('Marker is not suitable for landing.')
+
+						# Create a rotation matrix from roll, pitch, and yaw
+						rotation_matrix = tf_trans.euler_matrix(roll, pitch, yaw, 'sxyz')
+
+						# Extract the quaternion from the rotation matrix
+						quaternion = tf_trans.quaternion_from_matrix(rotation_matrix)
+
+						msg_out = TransformStamped()
+						msg_out.header = msg_in.header
+						msg_out.child_frame_id = "target"
+						msg_out.transform.translation.x = tvec[0,0,0]
+						msg_out.transform.translation.y = tvec[0,0,1]
+						msg_out.transform.translation.z = tvec[0,0,2]
+						
+						msg_out.transform.rotation.x = quaternion[0]
+						msg_out.transform.rotation.y = quaternion[1]
+						msg_out.transform.rotation.z = quaternion[2]
+						msg_out.transform.rotation.w = quaternion[3]
+
+						# time_found = rospy.Time.now()
+						time_found = rospy.Time(0)
+						self.pub_found.publish(time_found)
+						self.tfbr.sendTransform(msg_out)
+			return frame
+
+			
+	def publish_to_ros(self, frame):
+            msg_out = CompressedImage()
+            msg_out.header.stamp = rospy.Time.now()
+            msg_out.format = "jpeg"
+            msg_out.data = np.array(cv2.imencode('.jpg', frame)[1]).tostring()
+
+            self.aruco_pub.publish(msg_out)
+
+            msg = Bool()
+            msg.data = self.landing
+            
+            self.land_pub.publish(msg)
