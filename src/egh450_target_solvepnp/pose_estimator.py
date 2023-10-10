@@ -17,10 +17,12 @@ class PoseEstimator():
 	aruco_params = cv2.aruco.DetectorParameters_create()
 
 	def __init__(self):
-
+		self.time_finished_processing = rospy.Time(0)
 		self.aruco_pub = rospy.Publisher(
             '/processed_aruco/image/compressed', CompressedImage, queue_size=10)
 		self.pub_tts = rospy.Publisher('/depthai_node/detection/tts', String, queue_size=10)
+		self.tts_target = String()
+		self.tts_target.data = ''
 		
 		# Set up the CV Bridge
 		self.bridge = CvBridge()
@@ -35,6 +37,7 @@ class PoseEstimator():
 		self.param_sat_max = rospy.get_param("~sat_max", 255)
 		self.param_val_min = rospy.get_param("~val_min", 50)
 		self.param_val_max = rospy.get_param("~val_max", 255)
+		self.param_aruco_target = rospy.get_param("~aruco_target")
 
 		# Set additional camera parameters
 		self.got_camera_info = False
@@ -45,6 +48,7 @@ class PoseEstimator():
 		self.uav_pose = []
 		self.x_p = "-1"
 		self.y_p = "-1"
+		self.target_name = ""
 
 		# Set up landing site publisher
 		self.land_pub = rospy.Publisher('landing_site', Bool, queue_size=2)
@@ -56,11 +60,11 @@ class PoseEstimator():
 		self.sub_info = rospy.Subscriber("~camera_info", CameraInfo, self.callback_info)
 		
 		self.pub_found = rospy.Publisher('/uavasr/target_found', Time, queue_size=1)
+		self.pub_found_aruco = rospy.Publisher('/uavasr/aruco_found', Time, queue_size=1)
 
 		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
-		# TODO: change back for flight
-		# self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
-		self.sub_uav_pose = rospy.Subscriber('/uavasr/pose', PoseStamped, self.callback_uav_pose)
+		self.sub_uav_pose = rospy.Subscriber('~pose', PoseStamped, self.callback_uav_pose)
+
 
 		if self.param_use_compressed:
 			self.sub_img = rospy.Subscriber("~image_raw/compressed", CompressedImage, self.callback_img)
@@ -98,8 +102,11 @@ class PoseEstimator():
 		if msg_in.data != '':
 			msg = msg_in.data.split('-')
 			if msg[0] != '1':
-				self.x_p = msg[1]
-				self.y_p = msg[2]
+				self.target_name = msg[0]
+				#self.x_p = msg[1]
+				#self.y_p = msg[2]
+				self.x_t = msg[1]
+				self.y_t = msg[2]
 				self.pubrefresh = True
 
 
@@ -118,93 +125,104 @@ class PoseEstimator():
 			self.got_camera_info = True
 
 	def callback_img(self, msg_in):
-		# Don't bother to process image if we don't have the camera calibration
-		if self.got_camera_info:
-			#Convert ROS image to CV image
-			cv_image = None
+		if msg_in.header.stamp > self.time_finished_processing:
+			# Don't bother to process image if we don't have the camera calibration
+			if self.got_camera_info:
+				#Convert ROS image to CV image
+				cv_image = None
 
-			try:
-				if self.param_use_compressed:
-					cv_image = self.bridge.compressed_imgmsg_to_cv2( msg_in, "bgr8" )
-				else:
-					cv_image = self.bridge.imgmsg_to_cv2( msg_in, "bgr8" )
-			except CvBridgeError as e:
-				rospy.loginfo(e)
-				return
-			
-			if self.landing == False:
-				aruco = self.find_aruco(cv_image, msg_in)
-				self.publish_to_ros(aruco)
-
-			# Perform a colour mask for detection
-			mask_image = self.process_image(cv_image)
-
-			# # Find circles in the masked image
-			# min_dist = mask_image.shape[0]/8
-			# circles = cv2.HoughCircles(mask_image, cv2.HOUGH_GRADIENT, 1, min_dist, param1=50, param2=20, minRadius=0, maxRadius=0)
-
-			# If circles were detected
-			if (self.sub_topic_coord is not None) and self.pubrefresh == True:
-				self.pubrefresh = False
-				# Just take the first detected circle
-				# px = circles[0,0,0]
-				# py = circles[0,0,1]
-				# pr = circles[0,0,2]
-
-				# Centre of bounding box detection 
-				px = int(self.x_p)
-				py = int(self.y_p)
-				pr = int(0.5 * self.current_location.z) # Current Altitude (m)
-				# pr = 30
-
-				# Calculate the pictured the model for the pose solver
-				# For this example, draw a square around where the circle should be
-				# There are 5 points, one in the center, and one in each corner
-				self.model_image = np.array([
-											(px, py),
-											(px+pr, py+pr),
-											(px+pr, py-pr),
-											(px-pr, py+pr),
-											(px-pr, py-pr)])
-				self.model_image = self.model_image.astype('float32')
-
-				# Do the SolvePnP method
-				(success, rvec, tvec) = cv2.solvePnP(self.model_object, self.model_image, self.camera_matrix, self.dist_coeffs)
+				try:
+					if self.param_use_compressed:
+						cv_image = self.bridge.compressed_imgmsg_to_cv2( msg_in, "bgr8" )
+					else:
+						cv_image = self.bridge.imgmsg_to_cv2( msg_in, "bgr8" )
+				except CvBridgeError as e:
+					rospy.loginfo(e)
+					return
 				
-				# If a result was found, send to TF2
-				if success:
-					msg_out = TransformStamped()
-					msg_out.header = msg_in.header
-					msg_out.child_frame_id = "target"
-					msg_out.transform.translation.x = tvec[0]
-					msg_out.transform.translation.y = tvec[1]
-					msg_out.transform.translation.z = tvec[2]
-					msg_out.transform.rotation.w = 1.0	# Could use rvec, but need to convert from DCM to quaternion first
-					msg_out.transform.rotation.x = 0.0
-					msg_out.transform.rotation.y = 0.0
-					msg_out.transform.rotation.z = 0.0
+				if self.landing == False:
+					aruco = self.find_aruco(cv_image, msg_in)
+					self.publish_to_ros(aruco)
 
-					# time_found = rospy.Time.now()
-					time_found = rospy.Time(0)
-					self.pub_found.publish(time_found)
-					self.tfbr.sendTransform(msg_out)
+				# Perform a colour mask for detection
+				mask_image = self.process_image(cv_image)
+
+				# # Find circles in the masked image
+				# min_dist = mask_image.shape[0]/8
+				# circles = cv2.HoughCircles(mask_image, cv2.HOUGH_GRADIENT, 1, min_dist, param1=50, param2=20, minRadius=0, maxRadius=0)
+
+				# If circles were detected
+				if (self.sub_topic_coord is not None) and self.pubrefresh == True:
+					self.pubrefresh = False
+					# Just take the first detected circle
+					# px = circles[0,0,0]
+					# py = circles[0,0,1]
+					# pr = circles[0,0,2]
+
+					# Centre of bounding box detection 
+					#px = int(self.x_p)
+					#py = int(self.y_p)
+					px = int(self.x_t)
+					py = int(self.y_t)
+					pr = 30 - int(0.5 * self.current_location.z) # Current Altitude (m)
+					# pr = 30
+
+					# Calculate the pictured the model for the pose solver
+					# For this example, draw a square around where the circle should be
+					# There are 5 points, one in the center, and one in each corner
+					self.model_image = np.array([
+												(px, py),
+												(px+pr, py+pr),
+												(px+pr, py-pr),
+												(px-pr, py+pr),
+												(px-pr, py-pr)])
+					self.model_image = self.model_image.astype('float32')
+
+					# Do the SolvePnP method
+					(success, rvec, tvec) = cv2.solvePnP(self.model_object, self.model_image, self.camera_matrix, self.dist_coeffs)
 					
+					# If a result was found, send to TF2
+					if success:
+						msg_out = TransformStamped()
+						msg_out.header = msg_in.header
+						msg_out.child_frame_id = "target"
+						msg_out.transform.translation.x = tvec[1]
+						msg_out.transform.translation.y = tvec[0]
+						msg_out.transform.translation.z = tvec[2]
+						msg_out.transform.rotation.w = 1.0	# Could use rvec, but need to convert from DCM to quaternion first
+						msg_out.transform.rotation.x = 0.0
+						msg_out.transform.rotation.y = 0.0
+						msg_out.transform.rotation.z = 0.0
 
-				# Draw the circle for the overlay
-				cv2.circle(cv_image, (px,py), 2, (255, 0, 0), 2)	# Center
-				cv2.circle(cv_image, (px,py), pr, (0, 0, 255), 2)	# Outline
-				cv2.rectangle(cv_image, (px-pr,py-pr), (px+pr,py+pr), (0, 255, 0), 2)	# Model
+						# time_found = rospy.Time.now()
+						time_found = rospy.Time(0)
+						self.pub_found.publish(time_found)
+						self.tfbr.sendTransform(msg_out)
 
-			#Convert CV image to ROS image and publish the mask / overlay
-			try:
-				if self.param_use_compressed:
-					self.pub_mask.publish( self.bridge.cv2_to_compressed_imgmsg( mask_image, "png" ) )
-					self.pub_overlay.publish( self.bridge.cv2_to_compressed_imgmsg( cv_image, "png" ) )
-				else:
-					self.pub_mask.publish( self.bridge.cv2_to_imgmsg( mask_image, "mono8" ) )
-					self.pub_overlay.publish( self.bridge.cv2_to_imgmsg( cv_image, "bgr8" ) )
-			except (CvBridgeError,TypeError) as e:
-				rospy.loginfo(e)
+						self.tts_target.data = "{}, at x: {}, y: {}, z: {}".format(self.target_name, tvec[0], tvec[1], tvec[2])
+						rospy.loginfo("{}, at x: {}, y: {}, z: {}".format(self.target_name, tvec[0], tvec[1], tvec[2]))
+						rospy.loginfo("UAV, at x: {}, y: {}, z: {}".format(self.current_location.x, self.current_location.y, self.current_location.z))
+
+						self.pub_tts.publish(self.tts_target)
+						
+
+					# Draw the circle for the overlay
+					cv2.circle(cv_image, (px,py), 2, (255, 0, 0), 2)	# Center
+					cv2.circle(cv_image, (px,py), pr, (0, 0, 255), 2)	# Outline
+					cv2.rectangle(cv_image, (px-pr,py-pr), (px+pr,py+pr), (0, 255, 0), 2)	# Model
+
+				#Convert CV image to ROS image and publish the mask / overlay
+				try:
+					if self.param_use_compressed:
+						self.pub_mask.publish( self.bridge.cv2_to_compressed_imgmsg( mask_image, "png" ) )
+						self.pub_overlay.publish( self.bridge.cv2_to_compressed_imgmsg( cv_image, "png" ) )
+					else:
+						self.pub_mask.publish( self.bridge.cv2_to_imgmsg( mask_image, "mono8" ) )
+						self.pub_overlay.publish( self.bridge.cv2_to_imgmsg( cv_image, "bgr8" ) )
+				except (CvBridgeError,TypeError) as e:
+					rospy.loginfo(e)
+				
+				self.time_finished_processing = rospy.Time.now()
 
 	def process_image(self, cv_image):
 		#Convert the image to HSV and prepare the mask
@@ -238,82 +256,59 @@ class PoseEstimator():
 		return mask_image
 
 	def find_aruco(self, frame, msg_in):
-		if self.got_camera_info:
+		if self.got_camera_info and self.landing is False:
 			(corners, ids, _) = cv2.aruco.detectMarkers(
 				frame, self.aruco_dict, parameters=self.aruco_params)
-
-			tts_target = String()
-			tts_target.data = ''
 
 			if len(corners) > 0:
 				ids = ids.flatten()
 
 				for (marker_corner, marker_ID) in zip(corners, ids):
-					# TODO: if marker_ID == land_aruco
-					aruco_corners = corners
-					corners = marker_corner.reshape((4, 2))
-					(top_left, top_right, bottom_right, bottom_left) = corners
+					if marker_ID == self.param_aruco_target:
+						aruco_corners = corners
+						corners = marker_corner.reshape((4, 2))
+						(top_left, top_right, bottom_right, bottom_left) = corners
 
-					top_right = (int(top_right[0]), int(top_right[1]))
-					bottom_right = (int(bottom_right[0]), int(bottom_right[1]))
-					bottom_left = (int(bottom_left[0]), int(bottom_left[1]))
-					top_left = (int(top_left[0]), int(top_left[1]))
+						top_right = (int(top_right[0]), int(top_right[1]))
+						bottom_right = (int(bottom_right[0]), int(bottom_right[1]))
+						bottom_left = (int(bottom_left[0]), int(bottom_left[1]))
+						top_left = (int(top_left[0]), int(top_left[1]))
 
-					cv2.line(frame, top_left, top_right, (0, 255, 0), 2)
-					cv2.line(frame, top_right, bottom_right, (0, 255, 0), 2)
-					cv2.line(frame, bottom_right, bottom_left, (0, 255, 0), 2)
-					cv2.line(frame, bottom_left, top_left, (0, 255, 0), 2)
+						cv2.line(frame, top_left, top_right, (0, 255, 0), 2)
+						cv2.line(frame, top_right, bottom_right, (0, 255, 0), 2)
+						cv2.line(frame, bottom_right, bottom_left, (0, 255, 0), 2)
+						cv2.line(frame, bottom_left, top_left, (0, 255, 0), 2)
 
-					rospy.loginfo("Aruco detected, ID: {} a coordinate: {}, {}".format(marker_ID, self.x_p, self.y_p))
-					self.landing = True
+						rospy.loginfo("Aruco detected, ID: {} a coordinate: {}, {}".format(marker_ID, self.x_p, self.y_p))
 
-					tts_target.data = "Landing Site: ArUco Marker {}".format(marker_ID)
-					self.pub_tts.publish(tts_target)
-
-					cv2.putText(frame, str(
-						marker_ID), (top_left[0], top_right[1] - 15), cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 255, 0), 2)
-					
-					# Estimate the pose of the ArUco marker
-					rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(aruco_corners, 0.3, self.camera_matrix, self.dist_coeffs)
-					
-					if rvec is not None and tvec is not None:
-
-						roll, pitch, yaw = rvec[0][0]
-						# Convert roll and pitch to degrees
-						roll_degrees = math.degrees(roll)
-						pitch_degrees = math.degrees(pitch)
+						cv2.putText(frame, str(
+							marker_ID), (top_left[0], top_right[1] - 15), cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 255, 0), 2)
 						
-						rospy.loginfo('Roll: {} degrees, Pitch: {} degrees'.format(roll_degrees, pitch_degrees))
+						# Estimate the pose of the ArUco marker (not for angle only for coordinates)
+						rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(aruco_corners, 0.2, self.camera_matrix, self.dist_coeffs)
 						
-						# Check if both roll and pitch are close to zero (within a tolerance)
-						tolerance_degrees = 5.0  # Adjust this tolerance as needed
-						if abs(roll_degrees) < tolerance_degrees and abs(pitch_degrees) < tolerance_degrees:
-							rospy.loginfo('Marker is safe to land on.')
-						else:
-							rospy.loginfo('Marker is not suitable for landing.')
+						if tvec is not None:
+							self.landing = True
+							self.tts_target.data = "Landing Site: ID {}, at x: {}, y: {}, z: {}".format(marker_ID, tvec[0,0,0], tvec[0,0,1], tvec[0,0,2])
+							self.pub_tts.publish(self.tts_target)
+							
+							rospy.loginfo('x: {}, y: {}, z: {}'.format(tvec[0,0,0], tvec[0,0,1], tvec[0,0,2]))
 
-						# Create a rotation matrix from roll, pitch, and yaw
-						rotation_matrix = tf_trans.euler_matrix(roll, pitch, yaw, 'sxyz')
+							msg_out = TransformStamped()
+							msg_out.header = msg_in.header
+							msg_out.child_frame_id = "aruco"
+							msg_out.transform.translation.x = tvec[0,0,0]
+							msg_out.transform.translation.y = tvec[0,0,1]
+							msg_out.transform.translation.z = tvec[0,0,2]
+							
+							msg_out.transform.rotation.w = 1.0	
+							msg_out.transform.rotation.x = 0.0
+							msg_out.transform.rotation.y = 0.0
+							msg_out.transform.rotation.z = 0.0
 
-						# Extract the quaternion from the rotation matrix
-						quaternion = tf_trans.quaternion_from_matrix(rotation_matrix)
-
-						msg_out = TransformStamped()
-						msg_out.header = msg_in.header
-						msg_out.child_frame_id = "target"
-						msg_out.transform.translation.x = tvec[0,0,0]
-						msg_out.transform.translation.y = tvec[0,0,1]
-						msg_out.transform.translation.z = tvec[0,0,2]
-						
-						msg_out.transform.rotation.x = quaternion[0]
-						msg_out.transform.rotation.y = quaternion[1]
-						msg_out.transform.rotation.z = quaternion[2]
-						msg_out.transform.rotation.w = quaternion[3]
-
-						# time_found = rospy.Time.now()
-						time_found = rospy.Time(0)
-						self.pub_found.publish(time_found)
-						self.tfbr.sendTransform(msg_out)
+							time_found = rospy.Time(0)
+							self.pub_found_aruco.publish(time_found)
+							self.tfbr.sendTransform(msg_out)
 			return frame
 
 			
