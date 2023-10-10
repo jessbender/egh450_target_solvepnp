@@ -12,6 +12,8 @@
 		<param name="val_min" value="100" type="int"/>
 		<param name="val_max" value="255" type="int"/>
 
+		<param name="aruco_target" value="49" type="int"/>
+
 		<!-- Setting this to true will tell the program to use "~image_raw" + "/compressed" instead -->
 		<param name="use_compressed" value="true" type="bool"/>
 
@@ -23,5 +25,8 @@
 		<remap from="~debug/image_raw/compressed" to="/debug_compressed"/>
 		<remap from="~overlay/image_raw/compressed" to="/overlay_compressed"/>
 		-->
+
+		<!-- <remap from="~/pose" to="uavasr/pose" /> -->
+		<remap from="~/pose" to="/mavros/local_position/pose" />
 	</node>
 </launch>
