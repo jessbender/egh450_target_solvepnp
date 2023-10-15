@@ -23,5 +23,8 @@
 		<remap from="~debug/image_raw/compressed" to="/debug_compressed"/>
 		<remap from="~overlay/image_raw/compressed" to="/overlay_compressed"/>
 		-->
+
+		<remap from="~/pose" to="uavasr/pose" />
+		<!-- <remap from="~/pose" to="/mavros/local_position/pose" /> -->
 	</node>
 </launch>

@@ -15,6 +15,7 @@ from std_msgs.msg import String, Time
 
 class PoseEstimator():
 	def __init__(self):
+		self.time_finished_processing = rospy.Time(0)
 		# Set up the CV Bridge
 		self.bridge = CvBridge()
 		self.pubrefresh = False
@@ -39,6 +40,7 @@ class PoseEstimator():
 		self.uav_pose = []
 		self.x_p = "-1"
 		self.y_p = "-1"
+		self.target_name = ""
 
 		# Set up the publishers, subscribers, and tf2
 		self.sub_info = rospy.Subscriber("~camera_info", CameraInfo, self.callback_info)
@@ -47,8 +49,7 @@ class PoseEstimator():
 
 		self.sub_topic_coord = rospy.Subscriber('/depthai_node/detection/target_coord',String, self.callback_coord)
 		# TODO: change back for flight
-		self.sub_uav_pose = rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.callback_uav_pose)
-		# self.sub_uav_pose = rospy.Subscriber('/uavasr/pose', PoseStamped, self.callback_uav_pose)
+		self.sub_uav_pose = rospy.Subscriber('~pose', PoseStamped, self.callback_uav_pose)
 
 		if self.param_use_compressed:
 			self.sub_img = rospy.Subscriber("~image_raw/compressed", CompressedImage, self.callback_img)
@@ -79,13 +80,16 @@ class PoseEstimator():
 	def callback_uav_pose(self, msg_in):
 		self.current_location = msg_in.pose.position
 		self.uav_pose = [self.current_location.x, self.current_location.y, self.current_location.z, 0.0]
+		self.x_p = self.uav_pose[0]
+		self.y_p = self.uav_pose[1]
 
 	def callback_coord(self, msg_in):		
 		if msg_in.data != '':
 			msg = msg_in.data.split('-')
 			if msg[0] != '1':
-				self.x_p = msg[1]
-				self.y_p = msg[2]
+				self.target_name = msg[0]
+				self.x_t = msg[1]
+				self.y_t = msg[2]
 				self.pubrefresh = True
 
 
@@ -104,88 +108,94 @@ class PoseEstimator():
 			self.got_camera_info = True
 
 	def callback_img(self, msg_in):
-		# Don't bother to process image if we don't have the camera calibration
-		if self.got_camera_info:
-			#Convert ROS image to CV image
-			cv_image = None
+		if msg_in.header.stamp > self.time_finished_processing:
+			# Don't bother to process image if we don't have the camera calibration
+			if self.got_camera_info:
+				#Convert ROS image to CV image
+				cv_image = None
 
-			try:
-				if self.param_use_compressed:
-					cv_image = self.bridge.compressed_imgmsg_to_cv2( msg_in, "bgr8" )
-				else:
-					cv_image = self.bridge.imgmsg_to_cv2( msg_in, "bgr8" )
-			except CvBridgeError as e:
-				rospy.loginfo(e)
-				return
+				try:
+					if self.param_use_compressed:
+						cv_image = self.bridge.compressed_imgmsg_to_cv2( msg_in, "bgr8" )
+					else:
+						cv_image = self.bridge.imgmsg_to_cv2( msg_in, "bgr8" )
+				except CvBridgeError as e:
+					rospy.loginfo(e)
+					return
 
-			# Perform a colour mask for detection
-			mask_image = self.process_image(cv_image)
+				# Perform a colour mask for detection
+				mask_image = self.process_image(cv_image)
 
-			# # Find circles in the masked image
-			# min_dist = mask_image.shape[0]/8
-			# circles = cv2.HoughCircles(mask_image, cv2.HOUGH_GRADIENT, 1, min_dist, param1=50, param2=20, minRadius=0, maxRadius=0)
+				# # Find circles in the masked image
+				# min_dist = mask_image.shape[0]/8
+				# circles = cv2.HoughCircles(mask_image, cv2.HOUGH_GRADIENT, 1, min_dist, param1=50, param2=20, minRadius=0, maxRadius=0)
 
-			# If circles were detected
-			if (self.sub_topic_coord is not None) and self.pubrefresh == True:
-				self.pubrefresh = False
-				# Just take the first detected circle
-				# px = circles[0,0,0]
-				# py = circles[0,0,1]
-				# pr = circles[0,0,2]
+				# If circles were detected
+				if (self.sub_topic_coord is not None) and self.pubrefresh == True:
+					self.pubrefresh = False
+					# Just take the first detected circle
+					# px = circles[0,0,0]
+					# py = circles[0,0,1]
+					# pr = circles[0,0,2]
 
-				# Centre of bounding box detection 
-				px = int(self.x_p)
-				py = int(self.y_p)
-				pr = int(0.5 * self.current_location.z) # Current Altitude (m)
-				# pr = 30
+					# Centre of bounding box detection 
+					px = int(self.x_t)
+					py = int(self.y_t)
+					pr = 25 - int(0.5 * self.current_location.z) # Current Altitude (m)
+					# pr = 30
 
-				# Calculate the pictured the model for the pose solver
-				# For this example, draw a square around where the circle should be
-				# There are 5 points, one in the center, and one in each corner
-				self.model_image = np.array([
-											(px, py),
-											(px+pr, py+pr),
-											(px+pr, py-pr),
-											(px-pr, py+pr),
-											(px-pr, py-pr)])
-				self.model_image = self.model_image.astype('float32')
+					# Calculate the pictured the model for the pose solver
+					# For this example, draw a square around where the circle should be
+					# There are 5 points, one in the center, and one in each corner
+					self.model_image = np.array([
+												(px, py),
+												(px+pr, py+pr),
+												(px+pr, py-pr),
+												(px-pr, py+pr),
+												(px-pr, py-pr)])
+					self.model_image = self.model_image.astype('float32')
 
-				# Do the SolvePnP method
-				(success, rvec, tvec) = cv2.solvePnP(self.model_object, self.model_image, self.camera_matrix, self.dist_coeffs)
+					# Do the SolvePnP method
+					(success, rvec, tvec) = cv2.solvePnP(self.model_object, self.model_image, self.camera_matrix, self.dist_coeffs)
 
-				# If a result was found, send to TF2
-				if success:
-					msg_out = TransformStamped()
-					msg_out.header = msg_in.header
-					msg_out.child_frame_id = "target"
-					msg_out.transform.translation.x = tvec[0]
-					msg_out.transform.translation.y = tvec[1]
-					msg_out.transform.translation.z = tvec[2]
-					msg_out.transform.rotation.w = 1.0	# Could use rvec, but need to convert from DCM to quaternion first
-					msg_out.transform.rotation.x = 0.0
-					msg_out.transform.rotation.y = 0.0
-					msg_out.transform.rotation.z = 0.0
+					# If a result was found, send to TF2
+					if success:
+						msg_out = TransformStamped()
+						msg_out.header = msg_in.header
+						msg_out.child_frame_id = "target"
+						msg_out.transform.translation.x = -tvec[1]
+						msg_out.transform.translation.y = tvec[0]
+						msg_out.transform.translation.z = tvec[2]
+						msg_out.transform.rotation.w = 1.0	# Could use rvec, but need to convert from DCM to quaternion first
+						msg_out.transform.rotation.x = 0.0
+						msg_out.transform.rotation.y = 0.0
+						msg_out.transform.rotation.z = 0.0
 
-					time_found = rospy.Time.now()
-					self.pub_found.publish(time_found)
-					self.tfbr.sendTransform(msg_out)
-					
+						time_found = rospy.Time(0)
+						self.pub_found.publish(time_found)
+						self.tfbr.sendTransform(msg_out)
 
-				# Draw the circle for the overlay
-				cv2.circle(cv_image, (px,py), 2, (255, 0, 0), 2)	# Center
-				cv2.circle(cv_image, (px,py), pr, (0, 0, 255), 2)	# Outline
-				cv2.rectangle(cv_image, (px-pr,py-pr), (px+pr,py+pr), (0, 255, 0), 2)	# Model
+						rospy.loginfo("{}, at x: {}, y: {}".format(self.target_name, np.round(tvec[0], 2), np.round(tvec[1], 2)))
+						rospy.loginfo("UAV, at x: {}, y: {}, z: {}".format(np.round(self.current_location.x, 2), np.round(self.current_location.y, 2), np.round(self.current_location.z, 2)))
 
-			#Convert CV image to ROS image and publish the mask / overlay
-			try:
-				if self.param_use_compressed:
-					self.pub_mask.publish( self.bridge.cv2_to_compressed_imgmsg( mask_image, "png" ) )
-					self.pub_overlay.publish( self.bridge.cv2_to_compressed_imgmsg( cv_image, "png" ) )
-				else:
-					self.pub_mask.publish( self.bridge.cv2_to_imgmsg( mask_image, "mono8" ) )
-					self.pub_overlay.publish( self.bridge.cv2_to_imgmsg( cv_image, "bgr8" ) )
-			except (CvBridgeError,TypeError) as e:
-				rospy.loginfo(e)
+						
+
+					# Draw the circle for the overlay
+					cv2.circle(cv_image, (px,py), 2, (255, 0, 0), 2)	# Center
+					cv2.circle(cv_image, (px,py), pr, (0, 0, 255), 2)	# Outline
+					cv2.rectangle(cv_image, (px-pr,py-pr), (px+pr,py+pr), (0, 255, 0), 2)	# Model
+
+				#Convert CV image to ROS image and publish the mask / overlay
+				try:
+					if self.param_use_compressed:
+						self.pub_mask.publish( self.bridge.cv2_to_compressed_imgmsg( mask_image, "png" ) )
+						self.pub_overlay.publish( self.bridge.cv2_to_compressed_imgmsg( cv_image, "png" ) )
+					else:
+						self.pub_mask.publish( self.bridge.cv2_to_imgmsg( mask_image, "mono8" ) )
+						self.pub_overlay.publish( self.bridge.cv2_to_imgmsg( cv_image, "bgr8" ) )
+				except (CvBridgeError,TypeError) as e:
+					rospy.loginfo(e)
+				self.time_finished_processing = rospy.Time(0)
 
 	def process_image(self, cv_image):
 		#Convert the image to HSV and prepare the mask
