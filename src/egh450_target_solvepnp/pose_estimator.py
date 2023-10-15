@@ -186,7 +186,7 @@ class PoseEstimator():
 						msg_out = TransformStamped()
 						msg_out.header = msg_in.header
 						msg_out.child_frame_id = "target"
-						msg_out.transform.translation.x = tvec[1]
+						msg_out.transform.translation.x = -tvec[1]
 						msg_out.transform.translation.y = tvec[0]
 						msg_out.transform.translation.z = tvec[2]
 						msg_out.transform.rotation.w = 1.0	# Could use rvec, but need to convert from DCM to quaternion first
@@ -199,9 +199,9 @@ class PoseEstimator():
 						self.pub_found.publish(time_found)
 						self.tfbr.sendTransform(msg_out)
 
-						self.tts_target.data = "{}, at x: {}, y: {}, z: {}".format(self.target_name, tvec[0], tvec[1], tvec[2])
-						rospy.loginfo("{}, at x: {}, y: {}, z: {}".format(self.target_name, tvec[0], tvec[1], tvec[2]))
-						rospy.loginfo("UAV, at x: {}, y: {}, z: {}".format(self.current_location.x, self.current_location.y, self.current_location.z))
+						self.tts_target.data = "{}, at x: {}, y: {}".format(self.target_name, np.round(tvec[0], 2), np.round(tvec[1], 2))
+						rospy.loginfo("{}, at x: {}, y: {}".format(self.target_name, np.round(tvec[0], 2), np.round(tvec[1], 2)))
+						rospy.loginfo("UAV, at x: {}, y: {}, z: {}".format(np.round(self.current_location.x, 2), np.round(self.current_location.y, 2), np.round(self.current_location.z, 2)))
 
 						self.pub_tts.publish(self.tts_target)
 						
@@ -222,7 +222,7 @@ class PoseEstimator():
 				except (CvBridgeError,TypeError) as e:
 					rospy.loginfo(e)
 				
-				self.time_finished_processing = rospy.Time.now()
+				self.time_finished_processing = rospy.Time(0)
 
 	def process_image(self, cv_image):
 		#Convert the image to HSV and prepare the mask
@@ -280,25 +280,27 @@ class PoseEstimator():
 						cv2.line(frame, bottom_left, top_left, (0, 255, 0), 2)
 
 						rospy.loginfo("Aruco detected, ID: {} a coordinate: {}, {}".format(marker_ID, self.x_p, self.y_p))
+						rospy.loginfo("UAV, at x: {}, y: {}, z: {}".format(np.round(self.current_location.x, 2), np.round(self.current_location.y, 2), np.round(self.current_location.z, 2)))
 
 						cv2.putText(frame, str(
 							marker_ID), (top_left[0], top_right[1] - 15), cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 255, 0), 2)
 						
 						# Estimate the pose of the ArUco marker (not for angle only for coordinates)
+						# TODO ArUCO 0.2
 						rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(aruco_corners, 0.2, self.camera_matrix, self.dist_coeffs)
 						
 						if tvec is not None:
 							self.landing = True
-							self.tts_target.data = "Landing Site: ID {}, at x: {}, y: {}, z: {}".format(marker_ID, tvec[0,0,0], tvec[0,0,1], tvec[0,0,2])
+							self.tts_target.data = "Landing Site: ID {}, at x: {}, y: {}".format(marker_ID, np.round(tvec[0,0,0], 2), np.round(tvec[0,0,1], 2))
 							self.pub_tts.publish(self.tts_target)
 							
-							rospy.loginfo('x: {}, y: {}, z: {}'.format(tvec[0,0,0], tvec[0,0,1], tvec[0,0,2]))
+							rospy.loginfo('Landing Site: x: {}, y: {}'.format(np.round(tvec[0,0,0], 2), np.round(tvec[0,0,1], 2)))
 
 							msg_out = TransformStamped()
 							msg_out.header = msg_in.header
 							msg_out.child_frame_id = "aruco"
-							msg_out.transform.translation.x = tvec[0,0,0]
-							msg_out.transform.translation.y = tvec[0,0,1]
+							msg_out.transform.translation.x = -tvec[0,0,1]
+							msg_out.transform.translation.y = tvec[0,0,0]
 							msg_out.transform.translation.z = tvec[0,0,2]
 							
 							msg_out.transform.rotation.w = 1.0	
@@ -314,7 +316,7 @@ class PoseEstimator():
 			
 	def publish_to_ros(self, frame):
             msg_out = CompressedImage()
-            msg_out.header.stamp = rospy.Time.now()
+            msg_out.header.stamp = rospy.Time(0)
             msg_out.format = "jpeg"
             msg_out.data = np.array(cv2.imencode('.jpg', frame)[1]).tostring()
 
